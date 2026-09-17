@@ -344,6 +344,7 @@ def run(now: float, dry_run: bool = False, cache: dict | None = None) -> str:
         if not (current and current['turnId'] == active['turnId'] and current['quotaError']):
             state['activeDispatch'] = None
             save_state(state)
+            log(f'dispatch confirmed thread={active["threadId"]} (session moved on)')
         elif active.get('deliveryMode') == 'queued':
             elapsed = now - state.get('sent', {}).get(active['key'], now)
             if elapsed < UNCONFIRMED_SECONDS:
@@ -413,9 +414,15 @@ def run_once(dry_run: bool = False) -> str:
         cache = load_cache()
         result = run(time.time(), dry_run=dry_run, cache=cache)
         state = load_state()
+        now = time.time()
         if state.get('status') != result:
             log(result)
-        state.update(status=result, lastCheckedAt=time.time())
+            state['lastLoggedAt'] = now
+        elif result != 'no-quota-stall' and now - state.get('lastLoggedAt', 0) >= 600:
+            # Keep long waits traceable without spamming one line per minute.
+            log(f'still {result}')
+            state['lastLoggedAt'] = now
+        state.update(status=result, lastCheckedAt=now)
         save_state(state)
         save_cache(cache)
         return result
@@ -525,4 +532,8 @@ if __name__ == '__main__':
     elif args.dry_run:
         print(run_once(dry_run=True))
     else:
-        run_once()
+        try:
+            run_once()
+        except Exception as error:
+            log(f'error {type(error).__name__}: {error}')
+            raise

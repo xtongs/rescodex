@@ -32,10 +32,13 @@ macOS 本地看门狗:Codex 任务因额度耗尽(`usage_limit_exceeded`)中断�
 ```bash
 python3 watcher.py --status    # 状态 + 当前候选
 tail ~/Library/Application\ Support/codex-quota-resume/watcher.log
+tail ~/Library/Application\ Support/codex-quota-resume/launchd.err.log  # 崩溃堆栈,正常为空
 python3 watcher.py --dry-run   # 只报告将要做什么,不发送
 python3 watcher.py --self-test # 内置夹具
 python3 -m unittest test_watcher
 ```
+
+追查问题看三处:`watcher.log` 记录每次决策(状态变化、派发/失败/恢复,长等待时每 10 分钟一条存活线);`state.json` 的 `lastCheckedAt` 是每分钟心跳、`sent` 是发送历史;`launchd.err.log` 只在进程异常退出时有内容。
 
 ## 边界
 
