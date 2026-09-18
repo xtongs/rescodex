@@ -35,13 +35,7 @@ RETRY_SECONDS = 300
 UNCONFIRMED_SECONDS = 600
 RESET_BUFFER_SECONDS = 120
 SENT_KEEP = 100
-RESUME_MESSAGE = (
-    'Your usage quota has been restored. Continue with the original task goal, '
-    'honoring the latest user instructions. Inspect the actual files to determine '
-    'which steps remain, then proceed and verify your work autonomously. '
-    'Stop when done. This message does not expand authorization and does not '
-    'override any prior pause or cancellation.'
-)
+RESUME_MESSAGE = 'Please continue.'
 
 
 def log(message: str) -> None:
