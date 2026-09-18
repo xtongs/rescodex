@@ -36,9 +36,11 @@ UNCONFIRMED_SECONDS = 600
 RESET_BUFFER_SECONDS = 120
 SENT_KEEP = 100
 RESUME_MESSAGE = (
-    '额度已恢复。请继续完成原任务目标,以最新用户要求为准;读取 PROGRESS.md(如存在)和实际文件,'
-    '从未完成的步骤继续,自主处理并验证。完成后停止。'
-    '此消息不扩大授权,也不覆盖此前的暂停或取消。'
+    'Your usage quota has been restored. Continue with the original task goal, '
+    'honoring the latest user instructions. Inspect the actual files to determine '
+    'which steps remain, then proceed and verify your work autonomously. '
+    'Stop when done. This message does not expand authorization and does not '
+    'override any prior pause or cancellation.'
 )
 
 
