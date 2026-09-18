@@ -10,7 +10,6 @@ notifications, all state stays local.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import re
@@ -22,9 +21,16 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # Windows has no fcntl; msvcrt.locking stands in for the lock.
+    import msvcrt
+    fcntl = None
+
 APP_NAME = 'codex-quota-resume'
-STATE_DIR = Path(os.environ.get('QUOTA_RESUME_HOME')
-                 or Path.home() / 'Library/Application Support' / APP_NAME)
+STATE_DIR = Path(os.environ.get('QUOTA_RESUME_HOME') or (
+    Path.home() / 'AppData/Local' / APP_NAME if os.name == 'nt'
+    else Path.home() / 'Library/Application Support' / APP_NAME))
 STATE_PATH = STATE_DIR / 'state.json'
 CACHE_PATH = STATE_DIR / 'session-cache.json'
 LOG_PATH = STATE_DIR / 'watcher.log'
@@ -301,6 +307,12 @@ def quota_available(executable: str, candidate: dict, now: float) -> bool | None
 
 
 def codex_process_exists(thread: str) -> bool | None:
+    if os.name == 'nt':
+        # No pgrep on Windows: ask PowerShell whether any command line mentions the thread.
+        query = f"(Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%{thread}%'\").Count -gt 0"
+        result = subprocess.run(['powershell', '-NoProfile', '-Command', query],
+                                capture_output=True, text=True)
+        return None if result.returncode else result.stdout.strip() == 'True'
     result = subprocess.run(['pgrep', '-f', thread], capture_output=True, text=True)
     if result.returncode not in (0, 1):
         return None
@@ -418,12 +430,22 @@ def run(now: float, dry_run: bool = False, cache: dict | None = None) -> str:
     return 'resumed'
 
 
+def try_lock(stream) -> bool:
+    try:
+        if fcntl:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        return False
+    return True
+
+
 def run_once(dry_run: bool = False) -> str:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with LOCK_PATH.open('a+b') as lock:
-        try:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        if not try_lock(lock):
             return 'monitor-busy'
         cache = load_cache()
         result = run(time.time(), dry_run=dry_run, cache=cache)
