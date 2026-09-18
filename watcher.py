@@ -111,6 +111,8 @@ def parse_session(path: Path) -> dict | None:
     quota_at = None
     latest_limits = None
     cwd = None
+    model = None
+    approval_policy = None
     try:
         with path.open(encoding='utf-8') as stream:
             for line in stream:
@@ -121,6 +123,10 @@ def parse_session(path: Path) -> dict | None:
                 payload = record.get('payload', {})
                 if record.get('type') == 'session_meta':
                     cwd = payload.get('cwd')
+                    continue
+                if record.get('type') == 'turn_context':
+                    model = payload.get('model') or model
+                    approval_policy = payload.get('approval_policy') or approval_policy
                     continue
                 event = payload.get('type')
                 if event == 'task_started':
@@ -160,7 +166,8 @@ def parse_session(path: Path) -> dict | None:
         return None
     return {'threadId': thread_id(path), 'turnId': open_turn, 'limits': latest_limits,
             'quotaError': quota_error, 'quotaAt': quota_at,
-            'path': str(path), 'cwd': cwd, 'modifiedAt': modified_at}
+            'path': str(path), 'cwd': cwd, 'modifiedAt': modified_at,
+            'model': model, 'approvalPolicy': approval_policy}
 
 
 def scan_candidates(sessions_dir: Path, since: float, sent: dict, cache: dict) -> dict | None:
@@ -306,13 +313,22 @@ def codex_process_exists(thread: str) -> bool | None:
     return result.returncode == 0
 
 
-def dispatch(executable: str, thread: str, message: str, cwd: str | None = None):
-    command = [executable, 'exec', 'resume', '--skip-git-repo-check', '--json', thread, message]
+def dispatch(executable: str, thread: str, message: str, cwd: str | None = None,
+             model: str | None = None, approval_policy: str | None = None):
+    command = [executable, 'exec', 'resume', '--skip-git-repo-check', '--json']
+    # Replay the interrupted turn's recorded model/approval so the resumed turn
+    # keeps the session's settings instead of whatever config.toml has now.
+    if model:
+        command += ['-c', f'model={json.dumps(model)}']
+    if approval_policy:
+        command += ['-c', f'approval_policy={json.dumps(approval_policy)}']
+    command += [thread, message]
     result = subprocess.run(command, cwd=cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                             text=True, encoding='utf-8', errors='replace')
     if result.returncode and 'active writer' in result.stderr:
         # The desktop app owns this session: hand the message to its writer.
+        # Config overrides are omitted: the desktop process uses its own runtime.
         return queue_dispatch(executable, thread, message)
     return result
 
@@ -387,7 +403,9 @@ def run(now: float, dry_run: bool = False, cache: dict | None = None) -> str:
     save_state(state)
 
     try:
-        result = dispatch(find_codex(), candidate['threadId'], RESUME_MESSAGE, candidate.get('cwd'))
+        result = dispatch(find_codex(), candidate['threadId'], RESUME_MESSAGE, candidate.get('cwd'),
+                          model=candidate.get('model'),
+                          approval_policy=candidate.get('approvalPolicy'))
     except OSError as error:
         rollback(state, candidate)
         log(f'could not start resume thread={candidate["threadId"]}: {error}')
@@ -464,6 +482,8 @@ def self_test() -> None:
             os.utime(path, (now - 300, now - 300))
 
         meta = {'type': 'session_meta', 'payload': {'cwd': '/tmp/project', 'session_id': 'x'}}
+        context = {'type': 'turn_context', 'payload': {'approval_policy': 'on-request',
+                                                       'model': 'gpt-fixture'}}
         turn1 = {'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'turn-1'}}
         limits = {'rate_limits': {'primary': {'used_percent': 100, 'resets_at': now - 600},
                                   'secondary': {'used_percent': 40, 'resets_at': now + 9999}}}
@@ -482,9 +502,10 @@ def self_test() -> None:
                                                   'type': 'task_complete', 'turn_id': 'turn-1'}}])
         assert done is None
 
-        stalled = parse_session_on(write, path, [meta, turn1, count, quota_fail('turn-1')])
+        stalled = parse_session_on(write, path, [meta, context, turn1, count, quota_fail('turn-1')])
         assert stalled and stalled['quotaError'] and stalled['turnId'] == 'turn-1'
         assert stalled['limits']['primary']['used_percent'] == 100
+        assert stalled['model'] == 'gpt-fixture' and stalled['approvalPolicy'] == 'on-request'
 
         aborted = parse_session_on(write, path, [meta, turn1, count, quota_fail('turn-1'),
                                                  {'type': 'event_msg', 'payload': {

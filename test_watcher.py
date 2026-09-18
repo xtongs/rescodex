@@ -42,8 +42,10 @@ class WatcherCase(unittest.TestCase):
         setattr(module, name, value)
         self.addCleanup(setattr, module, name, original)
 
-    def fake_dispatch(self, executable, thread, message, cwd=None):
-        self.dispatches.append((thread, message, cwd))
+    def fake_dispatch(self, executable, thread, message, cwd=None,
+                      model=None, approval_policy=None):
+        self.dispatches.append({'thread': thread, 'message': message, 'cwd': cwd,
+                                'model': model, 'approval_policy': approval_policy})
         behavior = self.dispatch_behavior
         if isinstance(behavior, Exception):
             raise behavior
@@ -63,6 +65,8 @@ class WatcherCase(unittest.TestCase):
             .isoformat().replace('+00:00', 'Z')
         return [
             {'type': 'session_meta', 'payload': {'cwd': '/tmp/project'}},
+            {'type': 'turn_context', 'payload': {'approval_policy': 'on-request',
+                                                 'model': 'gpt-test'}},
             {'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': turn}},
             {'type': 'event_msg', 'payload': {'type': 'token_count', 'rate_limits': {
                 'primary': {'used_percent': 100, 'resets_at': NOW - 600},
@@ -101,11 +105,13 @@ class RunTests(WatcherCase):
         result = watcher.run(NOW, cache={})
         self.assertEqual(result, 'resumed')
         self.assertEqual(len(self.dispatches), 1)
-        thread, message, cwd = self.dispatches[0]
-        self.assertEqual(thread, '00000000-0000-0000-0000-000000000002')
-        self.assertEqual(cwd, '/tmp/project')
-        self.assertIn(f'{thread}|turn-1', self.state()['sent'])
-        self.assertEqual(self.state()['activeDispatch']['threadId'], thread)
+        sent = self.dispatches[0]
+        self.assertEqual(sent['thread'], '00000000-0000-0000-0000-000000000002')
+        self.assertEqual(sent['cwd'], '/tmp/project')
+        self.assertEqual(sent['model'], 'gpt-test')
+        self.assertEqual(sent['approval_policy'], 'on-request')
+        self.assertIn(f"{sent['thread']}|turn-1", self.state()['sent'])
+        self.assertEqual(self.state()['activeDispatch']['threadId'], sent['thread'])
 
     def test_old_stalls_are_ignored(self):
         self.prime_state()
