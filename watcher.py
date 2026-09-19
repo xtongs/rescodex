@@ -27,6 +27,9 @@ except ImportError:  # Windows has no fcntl; msvcrt.locking stands in for the lo
     import msvcrt
     fcntl = None
 
+# Spawned helpers (powershell, codex) must not flash consoles under Task Scheduler.
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+
 APP_NAME = 'codex-quota-resume'
 STATE_DIR = Path(os.environ.get('QUOTA_RESUME_HOME') or (
     Path.home() / 'AppData/Local' / APP_NAME if os.name == 'nt'
@@ -233,7 +236,8 @@ class AppServerConnection:
         import threading
         self.process = subprocess.Popen(
             [executable, 'app-server', '--stdio'], stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding='utf-8')
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding='utf-8',
+            creationflags=NO_WINDOW)
         self.replies = queue.Queue()
 
         def read():
@@ -311,7 +315,7 @@ def codex_process_exists(thread: str) -> bool | None:
         # No pgrep on Windows: ask PowerShell whether any command line mentions the thread.
         query = f"(Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%{thread}%'\").Count -gt 0"
         result = subprocess.run(['powershell', '-NoProfile', '-Command', query],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, creationflags=NO_WINDOW)
         return None if result.returncode else result.stdout.strip() == 'True'
     result = subprocess.run(['pgrep', '-f', thread], capture_output=True, text=True)
     if result.returncode not in (0, 1):
@@ -331,7 +335,8 @@ def dispatch(executable: str, thread: str, message: str, cwd: str | None = None,
     command += [thread, message]
     result = subprocess.run(command, cwd=cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                            text=True, encoding='utf-8', errors='replace')
+                            text=True, encoding='utf-8', errors='replace',
+                            creationflags=NO_WINDOW)
     if result.returncode and 'active writer' in result.stderr:
         # The desktop app owns this session: hand the message to its writer.
         # Config overrides are omitted: the desktop process uses its own runtime.
@@ -342,7 +347,8 @@ def dispatch(executable: str, thread: str, message: str, cwd: str | None = None,
 def queue_dispatch(executable: str, thread: str, message: str):
     command = [executable, 'queue', '--thread', thread, '--message', message]
     result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
+                            stderr=subprocess.PIPE, text=True, encoding='utf-8',
+                            errors='replace', creationflags=NO_WINDOW)
     result.queued = result.returncode == 0
     return result
 
