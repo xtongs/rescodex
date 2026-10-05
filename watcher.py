@@ -48,6 +48,10 @@ SENT_KEEP = 100
 # internal enum also has untrusted (rejected outright) and granular (needs
 # structured data), which must fall back to config.toml instead of replaying.
 REPLAYABLE_APPROVAL_POLICIES = frozenset({'on-request', 'never', 'on-failure'})
+# Unknown sandbox_workspace_write.* keys are ignored with a warning rather than
+# rejected, so the sub-fields are safe to replay; the mode itself is a strict
+# enum and must be sanitized to avoid breaking exec startup.
+REPLAYABLE_SANDBOX_MODES = frozenset({'read-only', 'workspace-write', 'danger-full-access'})
 RESUME_MESSAGE = 'Please continue.'
 
 
@@ -120,6 +124,7 @@ def parse_session(path: Path) -> dict | None:
     cwd = None
     model = None
     approval_policy = None
+    sandbox = None
     try:
         with path.open(encoding='utf-8') as stream:
             for line in stream:
@@ -134,6 +139,8 @@ def parse_session(path: Path) -> dict | None:
                 if record.get('type') == 'turn_context':
                     model = payload.get('model') or model
                     approval_policy = payload.get('approval_policy') or approval_policy
+                    if payload.get('sandbox_policy'):
+                        sandbox = payload['sandbox_policy']
                     continue
                 event = payload.get('type')
                 if event == 'task_started':
@@ -174,7 +181,7 @@ def parse_session(path: Path) -> dict | None:
     return {'threadId': thread_id(path), 'turnId': open_turn, 'limits': latest_limits,
             'quotaError': quota_error, 'quotaAt': quota_at,
             'path': str(path), 'cwd': cwd, 'modifiedAt': modified_at,
-            'model': model, 'approvalPolicy': approval_policy}
+            'model': model, 'approvalPolicy': approval_policy, 'sandbox': sandbox}
 
 
 def scan_candidates(sessions_dir: Path, since: float, sent: dict, cache: dict) -> dict | None:
@@ -328,14 +335,23 @@ def codex_process_exists(thread: str) -> bool | None:
 
 
 def dispatch(executable: str, thread: str, message: str, cwd: str | None = None,
-             model: str | None = None, approval_policy: str | None = None):
+             model: str | None = None, approval_policy: str | None = None,
+             sandbox_mode: str | None = None, network_access: bool | None = None,
+             writable_roots: list | None = None):
     command = [executable, 'exec', 'resume', '--skip-git-repo-check', '--json']
-    # Replay the interrupted turn's recorded model/approval so the resumed turn
-    # keeps the session's settings instead of whatever config.toml has now.
+    # Replay the interrupted turn's recorded model/approval/sandbox so the
+    # resumed turn keeps the session's settings instead of config.toml's now.
     if model:
         command += ['-c', f'model={json.dumps(model)}']
     if approval_policy:
         command += ['-c', f'approval_policy={json.dumps(approval_policy)}']
+    if sandbox_mode:
+        command += ['-c', f'sandbox_mode={json.dumps(sandbox_mode)}']
+    if sandbox_mode == 'workspace-write':
+        if network_access is not None:
+            command += ['-c', f'sandbox_workspace_write.network_access={str(network_access).lower()}']
+        if writable_roots:
+            command += ['-c', f'sandbox_workspace_write.writable_roots={json.dumps(writable_roots)}']
     command += [thread, message]
     result = subprocess.run(command, cwd=cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -424,9 +440,22 @@ def run(now: float, dry_run: bool = False, cache: dict | None = None) -> str:
             log(f'ignoring unsupported approval_policy={approval_policy} '
                 f'thread={candidate["threadId"]}; falling back to config.toml')
             approval_policy = None
+        sandbox = dict(candidate.get('sandbox') or {})
+        sandbox_mode = sandbox.get('type')
+        if sandbox_mode and sandbox_mode not in REPLAYABLE_SANDBOX_MODES:
+            log(f'ignoring unsupported sandbox_mode={sandbox_mode} '
+                f'thread={candidate["threadId"]}; falling back to config.toml')
+            sandbox_mode = None
+        network_access = sandbox.get('network_access')
+        if not isinstance(network_access, bool):
+            network_access = None
+        writable_roots = sandbox.get('writable_roots') or None
         result = dispatch(find_codex(), candidate['threadId'], RESUME_MESSAGE, candidate.get('cwd'),
                           model=candidate.get('model'),
-                          approval_policy=approval_policy)
+                          approval_policy=approval_policy,
+                          sandbox_mode=sandbox_mode,
+                          network_access=network_access,
+                          writable_roots=writable_roots)
     except OSError as error:
         rollback(state, candidate)
         log(f'could not start resume thread={candidate["threadId"]}: {error}')
@@ -514,7 +543,11 @@ def self_test() -> None:
 
         meta = {'type': 'session_meta', 'payload': {'cwd': '/tmp/project', 'session_id': 'x'}}
         context = {'type': 'turn_context', 'payload': {'approval_policy': 'on-request',
-                                                       'model': 'gpt-fixture'}}
+                                                       'model': 'gpt-fixture',
+                                                       'sandbox_policy': {
+                                                           'type': 'workspace-write',
+                                                           'network_access': False,
+                                                           'writable_roots': ['/tmp/extra']}}}
         turn1 = {'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'turn-1'}}
         limits = {'rate_limits': {'primary': {'used_percent': 100, 'resets_at': now - 600},
                                   'secondary': {'used_percent': 40, 'resets_at': now + 9999}}}
@@ -537,6 +570,7 @@ def self_test() -> None:
         assert stalled and stalled['quotaError'] and stalled['turnId'] == 'turn-1'
         assert stalled['limits']['primary']['used_percent'] == 100
         assert stalled['model'] == 'gpt-fixture' and stalled['approvalPolicy'] == 'on-request'
+        assert stalled['sandbox']['type'] == 'workspace-write'
 
         aborted = parse_session_on(write, path, [meta, turn1, count, quota_fail('turn-1'),
                                                  {'type': 'event_msg', 'payload': {

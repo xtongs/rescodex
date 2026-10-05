@@ -42,10 +42,14 @@ class WatcherCase(unittest.TestCase):
         setattr(module, name, value)
         self.addCleanup(setattr, module, name, original)
 
-    def fake_dispatch(self, executable, thread, message, cwd=None,
-                      model=None, approval_policy=None):
+    def fake_dispatch(self, executable, thread, message, cwd=None, model=None,
+                      approval_policy=None, sandbox_mode=None, network_access=None,
+                      writable_roots=None):
         self.dispatches.append({'thread': thread, 'message': message, 'cwd': cwd,
-                                'model': model, 'approval_policy': approval_policy})
+                                'model': model, 'approval_policy': approval_policy,
+                                'sandbox_mode': sandbox_mode,
+                                'network_access': network_access,
+                                'writable_roots': writable_roots})
         behavior = self.dispatch_behavior
         if isinstance(behavior, Exception):
             raise behavior
@@ -66,7 +70,11 @@ class WatcherCase(unittest.TestCase):
         return [
             {'type': 'session_meta', 'payload': {'cwd': '/tmp/project'}},
             {'type': 'turn_context', 'payload': {'approval_policy': 'on-request',
-                                                 'model': 'gpt-test'}},
+                                                 'model': 'gpt-test',
+                                                 'sandbox_policy': {
+                                                     'type': 'workspace-write',
+                                                     'network_access': False,
+                                                     'writable_roots': ['/tmp/extra']}}},
             {'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': turn}},
             {'type': 'event_msg', 'payload': {'type': 'token_count', 'rate_limits': {
                 'primary': {'used_percent': 100, 'resets_at': NOW - 600},
@@ -110,6 +118,9 @@ class RunTests(WatcherCase):
         self.assertEqual(sent['cwd'], '/tmp/project')
         self.assertEqual(sent['model'], 'gpt-test')
         self.assertEqual(sent['approval_policy'], 'on-request')
+        self.assertEqual(sent['sandbox_mode'], 'workspace-write')
+        self.assertFalse(sent['network_access'])
+        self.assertEqual(sent['writable_roots'], ['/tmp/extra'])
         self.assertIn(f"{sent['thread']}|turn-1", self.state()['sent'])
         self.assertEqual(self.state()['activeDispatch']['threadId'], sent['thread'])
 
@@ -117,12 +128,32 @@ class RunTests(WatcherCase):
         self.prime_state()
         records = self.quota_stall()
         records[1] = {'type': 'turn_context', 'payload': {'approval_policy': 'untrusted',
-                                                          'model': 'gpt-test'}}
+                                                          'model': 'gpt-test',
+                                                          'sandbox_policy': {
+                                                              'type': 'workspace-write'}}}
         self.write_session(records)
         self.dispatch_behavior = SimpleNamespace(returncode=0, stderr='')
         self.assertEqual(watcher.run(NOW, cache={}), 'resumed')
         self.assertIsNone(self.dispatches[0]['approval_policy'])
         self.assertEqual(self.dispatches[0]['model'], 'gpt-test')
+        self.assertEqual(self.dispatches[0]['sandbox_mode'], 'workspace-write')
+
+    def test_unsupported_sandbox_mode_falls_back(self):
+        self.prime_state()
+        records = self.quota_stall()
+        records[1] = {'type': 'turn_context', 'payload': {'approval_policy': 'never',
+                                                          'model': 'gpt-test',
+                                                          'sandbox_policy': {
+                                                              'type': 'macos-seatbelt',
+                                                              'network_access': True}}}
+        self.write_session(records)
+        self.dispatch_behavior = SimpleNamespace(returncode=0, stderr='')
+        self.assertEqual(watcher.run(NOW, cache={}), 'resumed')
+        sent = self.dispatches[0]
+        self.assertIsNone(sent['sandbox_mode'])
+        self.assertIsNone(sent['network_access'])
+        self.assertIsNone(sent['writable_roots'])
+        self.assertEqual(sent['approval_policy'], 'never')
 
     def test_old_stalls_are_ignored(self):
         self.prime_state()
