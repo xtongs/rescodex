@@ -446,6 +446,7 @@ def run(now: float, dry_run: bool = False, cache: dict | None = None) -> str:
             log(f'ignoring unsupported sandbox_mode={sandbox_mode} '
                 f'thread={candidate["threadId"]}; falling back to config.toml')
             sandbox_mode = None
+            sandbox = {}
         network_access = sandbox.get('network_access')
         if not isinstance(network_access, bool):
             network_access = None
