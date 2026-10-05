@@ -10,7 +10,7 @@ macOS 本地看门狗:Codex 任务因额度耗尽(`usage_limit_exceeded`)中断�
 
 1. **发现** — 扫描 `~/.codex/sessions/**/*.jsonl`:跟踪每个会话"打开的回合",`task_complete` 且 `error.codex_error_info == "usage_limit_exceeded"` 判定为额度中断;正常完成、取消(`turn_aborted`)或已被手动续开的回合都不算。按 `(mtime, size)` 缓存解析结果,未变化的文件不重读。
 2. **确认额度** — 通过 `codex app-server --stdio` 调 `account/rateLimits/read` 查实时额度(`ordinaryUsageAllowed`);该实验接口不可用时回退用日志里 `rate_limits.*.resets_at` + 120 秒缓冲。
-3. **续跑** — `codex exec resume --skip-git-repo-check --json <会话UUID> "<续跑提示>"`,工作目录用原会话的;并通过 `-c` 回放中断回合记录的 `model` 与 `approval_policy`(来自会话日志的 `turn_context`),使续跑回合保持原会话的模型与审批设置;沙箱沿用当前 `~/.codex/config.toml`。若桌面端占用会话(active writer)则回退 `codex queue`(由桌面端进程按其自身运行时执行)。
+3. **续跑** — `codex exec resume --skip-git-repo-check --json <会话UUID> "<续跑提示>"`,工作目录用原会话的;并通过 `-c` 回放中断回合记录的 `model` 与 `approval_policy`(来自会话日志的 `turn_context`),使续跑回合保持原会话的模型与审批设置;旧版遗留、当前 CLI 已拒绝的审批值(如 `untrusted`)会自动降级为不覆盖、走 config.toml 并记日志;沙箱沿用当前 `~/.codex/config.toml`。若桌面端占用会话(active writer)则回退 `codex queue`(由桌面端进程按其自身运行时执行)。
 
 防重复与崩溃安全:
 

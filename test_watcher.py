@@ -113,6 +113,17 @@ class RunTests(WatcherCase):
         self.assertIn(f"{sent['thread']}|turn-1", self.state()['sent'])
         self.assertEqual(self.state()['activeDispatch']['threadId'], sent['thread'])
 
+    def test_unsupported_approval_policy_falls_back(self):
+        self.prime_state()
+        records = self.quota_stall()
+        records[1] = {'type': 'turn_context', 'payload': {'approval_policy': 'untrusted',
+                                                          'model': 'gpt-test'}}
+        self.write_session(records)
+        self.dispatch_behavior = SimpleNamespace(returncode=0, stderr='')
+        self.assertEqual(watcher.run(NOW, cache={}), 'resumed')
+        self.assertIsNone(self.dispatches[0]['approval_policy'])
+        self.assertEqual(self.dispatches[0]['model'], 'gpt-test')
+
     def test_old_stalls_are_ignored(self):
         self.prime_state()
         self.write_session(self.quota_stall(), mtime=NOW - 7200)

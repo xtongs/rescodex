@@ -44,6 +44,10 @@ RETRY_SECONDS = 300
 UNCONFIRMED_SECONDS = 600
 RESET_BUFFER_SECONDS = 120
 SENT_KEEP = 100
+# Values a plain `-c approval_policy=...` accepts on current Codex CLI; the
+# internal enum also has untrusted (rejected outright) and granular (needs
+# structured data), which must fall back to config.toml instead of replaying.
+REPLAYABLE_APPROVAL_POLICIES = frozenset({'on-request', 'never', 'on-failure'})
 RESUME_MESSAGE = 'Please continue.'
 
 
@@ -415,9 +419,14 @@ def run(now: float, dry_run: bool = False, cache: dict | None = None) -> str:
     save_state(state)
 
     try:
+        approval_policy = candidate.get('approvalPolicy')
+        if approval_policy and approval_policy not in REPLAYABLE_APPROVAL_POLICIES:
+            log(f'ignoring unsupported approval_policy={approval_policy} '
+                f'thread={candidate["threadId"]}; falling back to config.toml')
+            approval_policy = None
         result = dispatch(find_codex(), candidate['threadId'], RESUME_MESSAGE, candidate.get('cwd'),
                           model=candidate.get('model'),
-                          approval_policy=candidate.get('approvalPolicy'))
+                          approval_policy=approval_policy)
     except OSError as error:
         rollback(state, candidate)
         log(f'could not start resume thread={candidate["threadId"]}: {error}')
