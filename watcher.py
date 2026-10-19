@@ -107,8 +107,12 @@ def find_codex() -> str:
 
 
 def thread_id(path: Path) -> str | None:
+    # Fallback for files without a usable session_meta. Older layouts carry
+    # one UUID after the timestamp; Desktop 0.163 appends
+    # `_<rollout-file-uuid>` and the thread stays first, so never take the
+    # last UUID — that is the per-file id, not the thread.
     matches = UUID_RE.findall(path.name)
-    return matches[-1] if matches else None
+    return matches[0] if matches else None
 
 
 def parse_session(path: Path) -> dict | None:
@@ -122,6 +126,7 @@ def parse_session(path: Path) -> dict | None:
     quota_at = None
     latest_limits = None
     cwd = None
+    thread = None
     model = None
     approval_policy = None
     sandbox = None
@@ -135,6 +140,14 @@ def parse_session(path: Path) -> dict | None:
                 payload = record.get('payload', {})
                 if record.get('type') == 'session_meta':
                     cwd = payload.get('cwd')
+                    # session_meta is the authoritative thread id: Desktop
+                    # rollout filenames gained a trailing per-file UUID that
+                    # filename parsing cannot tell from the thread. Only
+                    # well-formed UUIDs are accepted; loose ids like the
+                    # self-test's 'x' fall back to the filename.
+                    value = payload.get('id') or payload.get('session_id')
+                    if isinstance(value, str) and UUID_RE.fullmatch(value):
+                        thread = value
                     continue
                 if record.get('type') == 'turn_context':
                     model = payload.get('model') or model
@@ -178,7 +191,7 @@ def parse_session(path: Path) -> dict | None:
         modified_at = path.stat().st_mtime
     except OSError:
         return None
-    return {'threadId': thread_id(path), 'turnId': open_turn, 'limits': latest_limits,
+    return {'threadId': thread or thread_id(path), 'turnId': open_turn, 'limits': latest_limits,
             'quotaError': quota_error, 'quotaAt': quota_at,
             'path': str(path), 'cwd': cwd, 'modifiedAt': modified_at,
             'model': model, 'approvalPolicy': approval_policy, 'sandbox': sandbox}
@@ -527,7 +540,7 @@ def show_status() -> None:
 
 
 def parse_session_on(write, path, records):
-    write(records)
+    write(records, target=path)
     return parse_session(path)
 
 
@@ -537,10 +550,10 @@ def self_test() -> None:
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / 'rollout-2026-01-01T00-00-00-00000000-0000-0000-0000-000000000001.jsonl'
 
-        def write(records):
-            path.write_text(''.join(json.dumps(record) + '\n' for record in records),
-                            encoding='utf-8')
-            os.utime(path, (now - 300, now - 300))
+        def write(records, target=path):
+            target.write_text(''.join(json.dumps(record) + '\n' for record in records),
+                              encoding='utf-8')
+            os.utime(target, (now - 300, now - 300))
 
         meta = {'type': 'session_meta', 'payload': {'cwd': '/tmp/project', 'session_id': 'x'}}
         context = {'type': 'turn_context', 'payload': {'approval_policy': 'on-request',
@@ -577,6 +590,21 @@ def self_test() -> None:
                                                  {'type': 'event_msg', 'payload': {
                                                      'type': 'turn_aborted', 'turn_id': 'turn-1'}}])
         assert aborted is None
+
+        # Desktop 0.163 names rollout files rollout-<ts>-<thread>_<file-id>.jsonl
+        # and records the real thread in session_meta; the trailing filename
+        # UUID is a per-file id, not the thread.
+        desktop_name = ('rollout-2026-01-01T00-00-00-00000000-0000-0000-0000-00000000000a_'
+                        '11111111-2222-3333-4444-555555555555.jsonl')
+        desktop_path = Path(directory) / desktop_name
+        desktop_meta = {'type': 'session_meta', 'payload': {
+            'cwd': '/tmp/project', 'id': '00000000-0000-0000-0000-00000000000a',
+            'session_id': '00000000-0000-0000-0000-00000000000a'}}
+        desktop_stalled = parse_session_on(write, desktop_path,
+                                           [desktop_meta, turn1, count, quota_fail('turn-1')])
+        assert desktop_stalled and desktop_stalled['threadId'] == \
+            '00000000-0000-0000-0000-00000000000a'
+        desktop_path.unlink()
 
         manual = parse_session_on(write, path, [meta, turn1, count, quota_fail('turn-1'),
                                                 {'type': 'event_msg', 'payload': {

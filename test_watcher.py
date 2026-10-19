@@ -14,6 +14,8 @@ import watcher
 
 NOW = 2_000_000_000
 THREAD = '00000000-0000-0000-0000-000000000001'
+# Trailing per-file UUID that Codex Desktop 0.163 appends to rollout names.
+ROLLOUT_FILE_ID = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
 
 
 class WatcherCase(unittest.TestCase):
@@ -233,6 +235,19 @@ class RunTests(WatcherCase):
         self.assertIsNone(self.state()['activeDispatch'])
         self.assertEqual(len(self.dispatches), 1)
 
+    def test_desktop_layout_dispatches_to_session_meta_thread(self):
+        self.prime_state()
+        records = self.quota_stall()
+        records[0] = {'type': 'session_meta',
+                      'payload': {'cwd': '/tmp/project', 'id': THREAD,
+                                  'session_id': THREAD}}
+        name = f'rollout-2026-10-18T21-04-26-{ROLLOUT_FILE_ID}_{THREAD}.jsonl'
+        self.write_session(records, name=name)
+        self.dispatch_behavior = SimpleNamespace(returncode=0, stderr='')
+        self.assertEqual(watcher.run(NOW, cache={}), 'resumed')
+        self.assertEqual(self.dispatches[0]['thread'], THREAD)
+        self.assertIn(f'{THREAD}|turn-1', self.state()['sent'])
+
     def test_manual_takeover_is_not_resumed(self):
         self.prime_state()
         records = self.quota_stall()
@@ -247,6 +262,29 @@ class UnitTests(WatcherCase):
     def test_thread_id(self):
         self.assertEqual(watcher.thread_id(Path(f'rollout-1-{THREAD}.jsonl')), THREAD)
         self.assertEqual(watcher.thread_id(Path('rollout-nope.jsonl')), None)
+
+    def test_thread_id_takes_first_uuid_for_desktop_0163_layout(self):
+        name = f'rollout-2026-10-18T21-04-26-{THREAD}_{ROLLOUT_FILE_ID}.jsonl'
+        self.assertEqual(watcher.thread_id(Path(name)), THREAD)
+
+    def test_session_meta_id_overrides_filename_thread(self):
+        # Filename order is deliberately inverted: the parse must trust
+        # session_meta, not positional filename heuristics.
+        records = self.quota_stall()
+        records[0] = {'type': 'session_meta',
+                      'payload': {'cwd': '/tmp/project', 'id': THREAD,
+                                  'session_id': THREAD}}
+        name = f'rollout-2026-10-18T21-04-26-{ROLLOUT_FILE_ID}_{THREAD}.jsonl'
+        path = self.write_session(records, name=name)
+        stalled = watcher.parse_session(path)
+        self.assertEqual(stalled['threadId'], THREAD)
+
+    def test_loose_session_id_falls_back_to_filename(self):
+        records = self.quota_stall()
+        records[0] = {'type': 'session_meta',
+                      'payload': {'cwd': '/tmp/project', 'session_id': 'x'}}
+        path = self.write_session(records)
+        self.assertEqual(watcher.parse_session(path)['threadId'], THREAD)
 
     def test_quota_open_from_response(self):
         self.assertIs(watcher.quota_open_from_response({'ordinaryUsageAllowed': True}), True)
